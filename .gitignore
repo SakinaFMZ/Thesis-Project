@@ -1,0 +1,30 @@
+# macOS metadata
+.DS_Store
+
+# IDE/editor settings
+.vscode/
+.idea/
+
+# Compiled object files
+*.o
+*.obj
+*.lo
+*.la
+
+# Compiled dynamic & static libraries
+*.a
+*.so
+*.dylib
+*.dll
+
+# Executables and build outputs
+*.out
+*.exe
+*.app
+*.dSYM/
+2D_Heisenberg_Model
+2D_Ising_Model
+main
+
+# Logs & temporary files
+*.log
