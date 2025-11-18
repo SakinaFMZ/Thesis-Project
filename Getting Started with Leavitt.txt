@@ -1,0 +1,54 @@
+﻿Leavitt
+Leavitt has 9 compute nodes, forming a 1152 core cluster with two 64-core AMD EPYC processors and 512 GB per node (details here: https://www.bates.edu/research-resources/leavitt-hpc-cluster/leavitt-hardware-specs/). Queuing is provided by SLURM. It was professionally installed and tested by Dell and is generally well-run.
+
+
+Backups are not provided for /home. There is no other scratch disk space on the machine, everything is in /home. However, the /home partition has 84 TB of space and was pretty free when I last checked. 
+
+
+Getting Access
+To get access to Leavitt, you can fill out the access request form. You will be granted an account on Leavitt within a day. You can also fill out this form for students (faculty must request accounts on students’ behalf)
+Logging in
+The main HPC system, leavitt, can be logged into at leavitt.bates.edu using ssh. This defaults to port 22, but on campus all you need to do is this:
+
+
+ssh yourusername@leavitt.bates.edu
+
+
+If you want to sign in off campus, you have to use port 222, and you must specify it in your ssh login:
+        
+        ssh -p 222 yourusername@leavitt.bates.edu
+
+
+Submitting a job
+Leavitt uses SLURM to schedule compute jobs across the 9 nodes. To submit something to run, you will have to create a SLURM submission script and run that. Let’s say you call your slurm script “slurmscript.sh” then you would run it with
+
+
+sbatch slurmscript.sh
+
+
+SLURM SCRIPT
+You can name your script whatever you would like, but it must end with .sh
+
+
+The Leavitt documentation on the Bates website describes how to make a slurm script.
+
+
+The most important thing is to remember to assign it to the correct partition. The list of available partitions is here.
+
+An example slurm script set up for 
+slurmscript.sh
+#!/bin/bash
+#
+#SBATCH --partition=faculty                      # Which partition to use
+#SBATCH --nodes=1                              # Number of nodes
+#SBATCH --ntasks=60                                # Number of parallel tasks (if parallelized)
+#SBATCH --cpus-per-task=1                        # Number of threads per task (if threaded)
+#SBATCH --output=output_filename%j.log          # Output that would print to the screen 
+# can be saved here
+#SBATCH --error=err_program_name%j.log            # Standard error log
+
+
+pwd; hostname; date
+
+
+./executable

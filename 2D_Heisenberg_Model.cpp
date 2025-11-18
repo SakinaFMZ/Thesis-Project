@@ -341,3 +341,4 @@ void equilibrate(Spin (&Lattice)[len][len], double T)
         }
     }
 }
+// end of 2D_Heisenberg_Model.cpp
