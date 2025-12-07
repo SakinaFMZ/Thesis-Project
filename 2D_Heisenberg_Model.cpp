@@ -1,6 +1,6 @@
-// Casey Berger
-// Created: May 7 2014
-// Last edited: Sep 17, 2025 (updated for Bates)
+// Sakina Saidi
+// Created: Nov 15, 2025
+// Last edited: Nov 18, 2025
 //
 // using J = 1.0 and h = 0.0
 
@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <algorithm>
 #include <vector>
 #include <string>
 #include <stdio.h>
@@ -66,21 +67,18 @@ double tot_E(Spin Lattice[len][len]);
 void mc_sol(vector<double> &mc_E, Spin (&Lattice)[len][len], vector<double> &temp_vec);
 double avg(vector<double> sample_vec);
 void print_lattice(Spin Lattice[len][len]);
-void exact_sol(vector<double> &exact_E);
-void write_to_file(vector<double> &exact_E, vector<double> &mc_E, vector<double> &temp_vec);
+void write_to_file(vector<double> &mc_E, vector<double> &temp_vec);
 void equilibrate(Spin (&Lattice)[len][len], double T);
 
 int main ()
 {
     srand(time(NULL)); // seed random number
-    vector<double> exact_E; // stores exact solution
     vector<double> mc_E;    // stores monte carlo solution
     vector<double> temp_vec; // stores temperatures
     Spin Lattice[len][len]; // stores lattice configuration (Heisenberg spins)
     
     mc_sol(mc_E, Lattice, temp_vec);
-    exact_sol(exact_E);
-    write_to_file(exact_E, mc_E, temp_vec);
+    write_to_file(mc_E, temp_vec);
     return 0;
 }
 
@@ -261,49 +259,7 @@ void print_lattice(Spin Lattice[len][len])
     cout << endl;
 }
 
-// Reading Heisenberg exact solution file
-void exact_sol(vector<double> &exact_E)
-{
-    string fname = "exact_heisenberg_sol.txt";
-    ifstream fin;
-    fin.open(fname.c_str(), ios::in);
-    
-    if (!fin.is_open())
-    {
-        cerr << "Unable to open file " << fname << endl;
-        exit(20);
-    }
-    
-    string input;
-    vector<string> inputvec;
-    fin >> input;
-    while (!fin.fail())
-    {
-        if ((input != "\n") && (input != "\t") && (input != " "))
-        {
-            inputvec.push_back(input);
-        }
-        fin >> input;
-    }
-    fin.close();
-    
-    int j = 0;
-    for (unsigned int i = 0; i < inputvec.size(); i++)
-    {
-        if (inputvec[i] == "T/J")
-        {
-            j = i + 1;
-        }
-    }
-    for (unsigned int i = j; i < inputvec.size(); i = i + 2)
-    {
-        string s = inputvec[i];
-        double d = atof(s.c_str());
-        exact_E.push_back(d);
-    }
-}
-
-void write_to_file(vector<double> &exact_E, vector<double> &mc_E, vector<double> &temp_vec)
+void write_to_file(vector<double> &mc_E, vector<double> &temp_vec)
 {
     string fname = "mc_heisenberg_data.csv";
     ofstream fout;
@@ -314,13 +270,13 @@ void write_to_file(vector<double> &exact_E, vector<double> &mc_E, vector<double>
         cerr << "Unable to open file " << fname << "." << endl;
         exit(10);
     }
-    fout << "E/N exact, E/N mc, T/J" << endl;
-    for (unsigned int n = 0; n < exact_E.size(); n++)
+    fout << "E/N mc, T/J" << endl;
+    unsigned long data_points = min(mc_E.size(), temp_vec.size());
+    for (unsigned long n = 0; n < data_points; n++)
     {
-        fout << exact_E[n] << "," << 1.0 * mc_E[n] / (1.0 * J * num) << "," << temp_vec[n] / (abs(J)) << endl;
+        fout << 1.0 * mc_E[n] / (1.0 * J * num) << "," << temp_vec[n] / (abs(J)) << endl;
     }
     fout.close();
-    exact_E.clear();
     mc_E.clear();
     temp_vec.clear();
 }
@@ -341,4 +297,5 @@ void equilibrate(Spin (&Lattice)[len][len], double T)
         }
     }
 }
+
 // end of 2D_Heisenberg_Model.cpp
