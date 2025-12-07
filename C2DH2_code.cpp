@@ -65,14 +65,11 @@ double calc_E(Spin Lattice[len][len], int i, int j);
 void flip_spin(Spin (&Lattice)[len][len], int i, int j, double T, double &dE);
 double tot_E(Spin Lattice[len][len]);
 void mc_sol(vector<double> &mc_E, vector<double> &mc_M,
-            vector<double> &mc_E_err, vector<double> &mc_M_err,
             Spin (&Lattice)[len][len], vector<double> &temp_vec);
 double avg(const vector<double> &sample_vec);
-double std_error(const vector<double> &sample_vec);
 double magnetization(Spin Lattice[len][len]);
 void print_lattice(Spin Lattice[len][len]);
 void write_to_file(vector<double> &mc_E, vector<double> &mc_M,
-                   vector<double> &mc_E_err, vector<double> &mc_M_err,
                    vector<double> &temp_vec);
 void equilibrate(Spin (&Lattice)[len][len], double T);
 
@@ -80,15 +77,13 @@ int main()
 {
     srand(time(NULL)); // seed random number
 
-    vector<double> mc_E;       // Monte Carlo energies
-    vector<double> mc_M;       // Monte Carlo magnetizations
-    vector<double> mc_E_err;   // errors on energy
-    vector<double> mc_M_err;   // errors on magnetization
-    vector<double> temp_vec;   // temperatures
-    Spin Lattice[len][len];    // lattice configuration
+    vector<double> mc_E;      // Monte Carlo energies
+    vector<double> mc_M;      // Monte Carlo magnetizations
+    vector<double> temp_vec;  // temperatures
+    Spin Lattice[len][len];   // lattice configuration
 
-    mc_sol(mc_E, mc_M, mc_E_err, mc_M_err, Lattice, temp_vec);
-    write_to_file(mc_E, mc_M, mc_E_err, mc_M_err, temp_vec);
+    mc_sol(mc_E, mc_M, Lattice, temp_vec);
+    write_to_file(mc_E, mc_M, temp_vec);
 
     return 0;
 }
@@ -188,7 +183,6 @@ double tot_E(Spin Lattice[len][len])
 
 // Monte Carlo solution vs temperature
 void mc_sol(vector<double> &mc_E, vector<double> &mc_M,
-            vector<double> &mc_E_err, vector<double> &mc_M_err,
             Spin (&Lattice)[len][len], vector<double> &temp_vec)
 {
     double T = Tmax; // current temp
@@ -199,6 +193,8 @@ void mc_sol(vector<double> &mc_E, vector<double> &mc_M,
     // temperature loop
     while (T >= Tmin)
     {
+        double Eavg = 0.0;
+        double Mavg = 0.0;
         vector<double> E_config; // energies at this T
         vector<double> M_config; // magnetizations at this T
 
@@ -224,15 +220,11 @@ void mc_sol(vector<double> &mc_E, vector<double> &mc_M,
             M_config.push_back(M);
         }
 
-        double Eavg = avg(E_config);
-        double Mavg = avg(M_config);
-        double Eerr = std_error(E_config);
-        double Merr = std_error(M_config);
+        Eavg = avg(E_config);
+        Mavg = avg(M_config);
 
         mc_E.push_back(Eavg);
         mc_M.push_back(Mavg);
-        mc_E_err.push_back(Eerr);
-        mc_M_err.push_back(Merr);
         temp_vec.push_back(T);
 
         E_config.clear();
@@ -253,27 +245,6 @@ double avg(const vector<double> &sample_vec)
         sum += sample_vec[n];
     }
     return sum / static_cast<double>(sample_vec.size());
-}
-
-// standard error of the mean (for error bars)
-double std_error(const vector<double> &sample_vec)
-{
-    int n = sample_vec.size();
-    if (n <= 1)
-        return 0.0;
-
-    double mean = avg(sample_vec);
-    double var = 0.0;
-
-    for (int i = 0; i < n; i++)
-    {
-        double diff = sample_vec[i] - mean;
-        var += diff * diff;
-    }
-    var /= (n - 1); // sample variance
-
-    double stddev = sqrt(var);
-    return stddev / sqrt(static_cast<double>(n));
 }
 
 // compute total magnetization magnitude per spin
@@ -313,7 +284,6 @@ void print_lattice(Spin Lattice[len][len])
 }
 
 void write_to_file(vector<double> &mc_E, vector<double> &mc_M,
-                   vector<double> &mc_E_err, vector<double> &mc_M_err,
                    vector<double> &temp_vec)
 {
     string fname = "mc_heisenberg_data.csv";
@@ -326,35 +296,24 @@ void write_to_file(vector<double> &mc_E, vector<double> &mc_M,
         exit(10);
     }
 
-    // header: mean energy, its error, mean magnetization, its error, T/J
-    fout << "E/N mc, dE, M/N mc, dM, T/J" << endl;
+    fout << "E/N mc, M/N mc, T/J" << endl;
 
     unsigned long data_points = mc_E.size();
-    if (mc_M.size()     < data_points) data_points = mc_M.size();
-    if (mc_E_err.size() < data_points) data_points = mc_E_err.size();
-    if (mc_M_err.size() < data_points) data_points = mc_M_err.size();
+    if (mc_M.size() < data_points) data_points = mc_M.size();
     if (temp_vec.size() < data_points) data_points = temp_vec.size();
 
     for (unsigned long n = 0; n < data_points; n++)
     {
-        double E_per_spin   = mc_E[n]     / (J * num);
-        double dE_per_spin  = mc_E_err[n] / (J * num);
-        double M_per_spin   = mc_M[n];        // already per spin
-        double dM_per_spin  = mc_M_err[n];    // already per spin
-        double T_over_J     = temp_vec[n] / fabs(J);
+        double E_per_spin = mc_E[n] / (J * num);
+        double M_per_spin = mc_M[n];
+        double T_over_J   = temp_vec[n] / fabs(J);
 
-        fout << E_per_spin  << ","
-             << dE_per_spin << ","
-             << M_per_spin  << ","
-             << dM_per_spin << ","
-             << T_over_J    << endl;
+        fout << E_per_spin << "," << M_per_spin << "," << T_over_J << endl;
     }
 
     fout.close();
     mc_E.clear();
     mc_M.clear();
-    mc_E_err.clear();
-    mc_M_err.clear();
     temp_vec.clear();
 }
 
