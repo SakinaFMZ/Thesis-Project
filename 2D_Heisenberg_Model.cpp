@@ -1,6 +1,6 @@
 // Sakina Saidi
 // Created: Nov 15, 2025
-// Last edited: Nov 18, 2025
+// Last edited: Dec 7, 2025
 //
 // using J = 1.0 and h = 0.0
 
@@ -49,36 +49,42 @@ double dot(const Spin &a, const Spin &b) {
 }
 
 // global variables
-const int len = 10;        // length of lattice
-const int l_end = len - 1; // last spot on lattice
-const int num = len * len; // total number of spins
-double Tmax = 5.0;         // max temp
-double Tmin = 0.0;         // min temp
-double dT = 0.2;           // temperature iterator
+const int len = 10;          // length of lattice
+const int l_end = len - 1;   // last spot on lattice
+const int num = len * len;   // total number of spins
+double Tmax = 5.0;           // max temp
+double Tmin = 0.0;           // min temp
+double dT = 0.2;             // temperature iterator
 const int mc_iter = 1000000; // number of monte carlo iterations
 const int eq_iter = 1000;    // number of iterations for equilibration
 double J = 1.0;              // interaction strength
 
-// function declaration
+// function declarations
 void make_lattice(Spin (&Lattice)[len][len]);
 double calc_E(Spin Lattice[len][len], int i, int j);
 void flip_spin(Spin (&Lattice)[len][len], int i, int j, double T, double &dE);
 double tot_E(Spin Lattice[len][len]);
-void mc_sol(vector<double> &mc_E, Spin (&Lattice)[len][len], vector<double> &temp_vec);
-double avg(vector<double> sample_vec);
+void mc_sol(vector<double> &mc_E, vector<double> &mc_M,
+            Spin (&Lattice)[len][len], vector<double> &temp_vec);
+double avg(const vector<double> &sample_vec);
+double magnetization(Spin Lattice[len][len]);
 void print_lattice(Spin Lattice[len][len]);
-void write_to_file(vector<double> &mc_E, vector<double> &temp_vec);
+void write_to_file(vector<double> &mc_E, vector<double> &mc_M,
+                   vector<double> &temp_vec);
 void equilibrate(Spin (&Lattice)[len][len], double T);
 
-int main ()
+int main()
 {
     srand(time(NULL)); // seed random number
-    vector<double> mc_E;    // stores monte carlo solution
-    vector<double> temp_vec; // stores temperatures
-    Spin Lattice[len][len]; // stores lattice configuration (Heisenberg spins)
-    
-    mc_sol(mc_E, Lattice, temp_vec);
-    write_to_file(mc_E, temp_vec);
+
+    vector<double> mc_E;      // Monte Carlo energies
+    vector<double> mc_M;      // Monte Carlo magnetizations
+    vector<double> temp_vec;  // temperatures
+    Spin Lattice[len][len];   // lattice configuration
+
+    mc_sol(mc_E, mc_M, Lattice, temp_vec);
+    write_to_file(mc_E, mc_M, temp_vec);
+
     return 0;
 }
 
@@ -99,7 +105,7 @@ double calc_E(Spin Lattice[len][len], int i, int j)
 {
     double Energy = 0.0;
 
-    // periodic neighbor indices (simplifies all the old if/else)
+    // periodic neighbor indices
     int ip = (i + 1) % len;
     int im = (i - 1 + len) % len;
     int jp = (j + 1) % len;
@@ -176,7 +182,8 @@ double tot_E(Spin Lattice[len][len])
 }
 
 // Monte Carlo solution vs temperature
-void mc_sol(vector<double> &mc_E, Spin (&Lattice)[len][len], vector<double> &temp_vec)
+void mc_sol(vector<double> &mc_E, vector<double> &mc_M,
+            Spin (&Lattice)[len][len], vector<double> &temp_vec)
 {
     double T = Tmax; // current temp
 
@@ -187,59 +194,76 @@ void mc_sol(vector<double> &mc_E, Spin (&Lattice)[len][len], vector<double> &tem
     while (T >= Tmin)
     {
         double Eavg = 0.0;
-        vector<double> E_config; // energies of each configuration at this T
+        double Mavg = 0.0;
+        vector<double> E_config; // energies at this T
+        vector<double> M_config; // magnetizations at this T
 
         equilibrate(Lattice, T); // let the lattice equilibrate
 
         // Monte Carlo loop
         for (int n = 0; n < mc_iter; n++)
         {
-            // pick a random starting site
-            int i = len * ((double)rand()) / ((double)RAND_MAX);
-            int j = len * ((double)rand()) / ((double)RAND_MAX);
-            int count = 0;
+            // Metropolis sweep across every lattice site
+            for (int i = 0; i < len; i++)
+            {
+                for (int j = 0; j < len; j++)
+                {
+                    double dE = 0.0;
+                    flip_spin(Lattice, i, j, T, dE);
+                }
+            }
 
             double Energy = tot_E(Lattice);
-
-            // Metropolis sweep
-            while (count < num)
-            {
-                double dE = 0.0;
-                flip_spin(Lattice, i, j, T, dE);
-
-                if (i == l_end)
-                    i = 0;
-                else
-                    i++;
-
-                if (j == l_end)
-                    j = 0;
-                else
-                    j++;
-
-                count++;
-            }
-            Energy = tot_E(Lattice);
             E_config.push_back(Energy);
+
+            double M = magnetization(Lattice);
+            M_config.push_back(M);
         }
+
         Eavg = avg(E_config);
+        Mavg = avg(M_config);
+
         mc_E.push_back(Eavg);
+        mc_M.push_back(Mavg);
         temp_vec.push_back(T);
+
         E_config.clear();
+        M_config.clear();
+
         T = T - dT;
     }
 }
 
-double avg(vector<double> sample_vec)
+double avg(const vector<double> &sample_vec)
 {
-    double avg = 0.0;
-    int elements = sample_vec.size();
-    for (int n = 0; n < elements; n++)
+    if (sample_vec.empty())
+        return 0.0;
+
+    double sum = 0.0;
+    for (unsigned int n = 0; n < sample_vec.size(); n++)
     {
-        avg = avg + sample_vec[n];
+        sum += sample_vec[n];
     }
-    avg = (1.0 / (1.0 * elements)) * avg;
-    return avg;
+    return sum / static_cast<double>(sample_vec.size());
+}
+
+// compute total magnetization magnitude per spin
+double magnetization(Spin Lattice[len][len])
+{
+    double mx = 0.0, my = 0.0, mz = 0.0;
+
+    for (int i = 0; i < len; i++)
+    {
+        for (int j = 0; j < len; j++)
+        {
+            mx += Lattice[i][j].x;
+            my += Lattice[i][j].y;
+            mz += Lattice[i][j].z;
+        }
+    }
+
+    double M = sqrt(mx * mx + my * my + mz * mz);
+    return M / num;   // return magnetization per spin
 }
 
 // simple visualization: sign of Sz
@@ -259,25 +283,37 @@ void print_lattice(Spin Lattice[len][len])
     cout << endl;
 }
 
-void write_to_file(vector<double> &mc_E, vector<double> &temp_vec)
+void write_to_file(vector<double> &mc_E, vector<double> &mc_M,
+                   vector<double> &temp_vec)
 {
     string fname = "mc_heisenberg_data.csv";
     ofstream fout;
     fout.open(fname.c_str(), ios::out);
-    
+
     if (!fout.is_open())
     {
         cerr << "Unable to open file " << fname << "." << endl;
         exit(10);
     }
-    fout << "E/N mc, T/J" << endl;
-    unsigned long data_points = min(mc_E.size(), temp_vec.size());
+
+    fout << "E/N mc, M/N mc, T/J" << endl;
+
+    unsigned long data_points = mc_E.size();
+    if (mc_M.size() < data_points) data_points = mc_M.size();
+    if (temp_vec.size() < data_points) data_points = temp_vec.size();
+
     for (unsigned long n = 0; n < data_points; n++)
     {
-        fout << 1.0 * mc_E[n] / (1.0 * J * num) << "," << temp_vec[n] / (abs(J)) << endl;
+        double E_per_spin = mc_E[n] / (J * num);
+        double M_per_spin = mc_M[n];
+        double T_over_J   = temp_vec[n] / fabs(J);
+
+        fout << E_per_spin << "," << M_per_spin << "," << T_over_J << endl;
     }
+
     fout.close();
     mc_E.clear();
+    mc_M.clear();
     temp_vec.clear();
 }
 
