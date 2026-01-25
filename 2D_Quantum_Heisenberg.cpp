@@ -337,9 +337,13 @@ double std_error(const vector<double> &v)
     return stddev / sqrt(static_cast<double>(bin_means.size()));
 }
 
-int main()
+int main(int argc, char* argv[])
 {
-    mt19937 rng(static_cast<unsigned int>(time(nullptr)));
+    unsigned int seed = static_cast<unsigned int>(time(nullptr));
+    if (argc > 1) {
+        seed = static_cast<unsigned int>(std::stoul(argv[1]));
+    }
+    mt19937 rng(seed);
 
     vector<int> bond_i, bond_j;
     build_bonds(bond_i, bond_j);
@@ -415,7 +419,7 @@ int main()
         temp_vec.push_back(T);
     }
 
-    string fname = "mc_heisenberg_data.csv";
+    string fname = "mc_qheis_seed_" + to_string(seed) + ".csv";
     ofstream fout(fname.c_str(), ios::out);
     if (!fout.is_open())
     {
