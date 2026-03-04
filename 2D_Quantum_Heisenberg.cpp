@@ -763,8 +763,11 @@ int main(int argc, char* argv[]) {
     if (p.beta > 0.0) {
         betas.push_back(p.beta);
     } else {
-        double default_betas[] = {0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0};
-        for (int i = 0; i < 8; i++) betas.push_back(default_betas[i]);
+        double default_betas[] = {
+            0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0,
+            4.0, 6.0, 8.0, 10.0, 15.0, 20.0
+        };
+        for (double b : default_betas) betas.push_back(b);
     }
 
     vector<ResultRow> results;
