@@ -1,624 +1,802 @@
 // Sakina Saidi
-// Created: Nov 15, 2025
-// Last edited: Feb 04, 2026
+// Created: Feb 24, 2026
 //
-// Minimal SSE QMC for the 2D spin-1/2 Heisenberg model (periodic boundary conditions)
-// H = J * sum_{<ij>} (S_i · S_j)  (no external field)
-// SSE operator decomposition used here:
-// H = -J * sum_b (H1_b - 1/4) - J * sum_b H2_b, with
-// H1_b = 1/4 - Sz_i Sz_j (diagonal), H2_b = 1/2 (S+_i S-_j + S-_i S+_j) (off-diagonal).
-// Allowed vertices have antiparallel spins, with matrix element w = 1/2.
+// Stochastic Series Expansion (SSE) Quantum Monte Carlo
+// 2D spin-1/2 antiferromagnetic Heisenberg model on a square lattice
+// with periodic boundary conditions.
+//
+// H = J * sum_{<ij>} S_i . S_j   (J > 0, antiferromagnetic)
+//
+// Reference: A.W. Sandvik, Phys. Rev. B 59, R14157 (1999)
 
 #include <iostream>
-#include <vector>
-#include <random>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <algorithm>
-#include <ctime>
+#include <vector>
 #include <string>
-#include <cstdlib>
-
+#include <sstream>
+#include <random>
+#include <cassert>
+#include <limits>
+#include <ctime>
 using namespace std;
 
-struct Op
-{
-    int type; // 0 = identity, 1 = diagonal, 2 = off-diagonal
-    int bond;
+// ---------------------------------------------------------------------------
+// SSE operator struct
+// ---------------------------------------------------------------------------
+struct Op {
+    int type;   // 0 = identity/filler, 1 = diagonal (H1), 2 = off-diagonal (H2)
+    int bond;   // index into bond table [0, NB)
 };
 
-int L = 10;                      // lattice length
-int N = L * L;                   // number of sites
-int NB = 2 * N;                  // number of bonds (right + up)
-double J = 1.0;                  // coupling
-int mc_iter = 10000;             // measurement sweeps
-int eq_iter = 2000;              // equilibration sweeps
-int bin_size = 50;               // bin size for error bars (block averaging)
-bool debug_mode = false;
+// ---------------------------------------------------------------------------
+// Global simulation state
+// ---------------------------------------------------------------------------
+static int L;                          // linear lattice size
+static int N;                          // number of sites = L*L
+static int NB;                         // number of bonds = 2*N
+static double J_coupling;              // coupling constant
+static int mc_iter;                    // measurement sweeps
+static int eq_iter;                    // equilibration sweeps
+static int bin_size;                   // block size for binned error
+static unsigned int seed_val;          // RNG seed
+static int debug_flag;                 // debug mode
 
-static inline int idx(int x, int y)
-{
-    return y * L + x;
+static vector<int> spin;              // spin configuration, +/-1 (= 2*Sz)
+static vector<Op> ops;                // operator string, length M
+static int M;                         // current operator string length
+static int n_ops;                     // number of non-identity operators
+
+static vector<int> bond_site1;        // bond table: first site
+static vector<int> bond_site2;        // bond table: second site
+
+static vector<int> vtx_link;          // linked vertex list, size 4*M
+static vector<int> first_vtx;         // first vertex leg per site, size N
+
+static mt19937 rng;                   // Mersenne Twister RNG
+
+// ---------------------------------------------------------------------------
+// CLI argument parsing
+// ---------------------------------------------------------------------------
+struct RunParams {
+    int L;
+    double J;
+    double beta;          // -1 means use default sweep
+    int mc_iter;
+    int eq_iter;
+    int bin_size;
+    unsigned int seed;
+    int debug;
+};
+
+static bool parse_int_str(const string& s, int& out) {
+    istringstream iss(s);
+    iss >> out;
+    return iss && iss.eof();
 }
 
-void build_bonds(vector<int> &bond_i, vector<int> &bond_j)
-{
-    bond_i.resize(NB);
-    bond_j.resize(NB);
+static bool parse_uint_str(const string& s, unsigned int& out) {
+    unsigned long long tmp = 0;
+    istringstream iss(s);
+    iss >> tmp;
+    if (!(iss && iss.eof())) return false;
+    if (tmp > (unsigned long long)numeric_limits<unsigned int>::max()) return false;
+    out = (unsigned int)tmp;
+    return true;
+}
+
+static bool parse_double_str(const string& s, double& out) {
+    istringstream iss(s);
+    iss >> out;
+    return iss && iss.eof();
+}
+
+RunParams parse_args(int argc, char* argv[]) {
+    RunParams p;
+    p.L = 10;
+    p.J = 1.0;
+    p.beta = -1.0;       // sentinel: use default sweep
+    p.mc_iter = 10000;
+    p.eq_iter = 2000;
+    p.bin_size = 50;
+    p.seed = (unsigned int)time(NULL);
+    p.debug = 0;
+
+    for (int i = 1; i < argc; i++) {
+        string arg = argv[i];
+        auto next_value = [&](const string& flag) -> string {
+            if (i + 1 >= argc) {
+                cerr << "Missing value for " << flag << endl;
+                exit(1);
+            }
+            return string(argv[++i]);
+        };
+
+        if (arg == "--L") {
+            int v = 0;
+            string s = next_value(arg);
+            if (!parse_int_str(s, v)) {
+                cerr << "Invalid integer for --L: " << s << endl;
+                exit(1);
+            }
+            p.L = v;
+        }
+        else if (arg == "--J") {
+            double v = 0.0;
+            string s = next_value(arg);
+            if (!parse_double_str(s, v)) {
+                cerr << "Invalid floating-point value for --J: " << s << endl;
+                exit(1);
+            }
+            p.J = v;
+        }
+        else if (arg == "--beta") {
+            double v = 0.0;
+            string s = next_value(arg);
+            if (!parse_double_str(s, v)) {
+                cerr << "Invalid floating-point value for --beta: " << s << endl;
+                exit(1);
+            }
+            p.beta = v;
+        }
+        else if (arg == "--mc_iter") {
+            int v = 0;
+            string s = next_value(arg);
+            if (!parse_int_str(s, v)) {
+                cerr << "Invalid integer for --mc_iter: " << s << endl;
+                exit(1);
+            }
+            p.mc_iter = v;
+        }
+        else if (arg == "--eq_iter") {
+            int v = 0;
+            string s = next_value(arg);
+            if (!parse_int_str(s, v)) {
+                cerr << "Invalid integer for --eq_iter: " << s << endl;
+                exit(1);
+            }
+            p.eq_iter = v;
+        }
+        else if (arg == "--bin_size") {
+            int v = 0;
+            string s = next_value(arg);
+            if (!parse_int_str(s, v)) {
+                cerr << "Invalid integer for --bin_size: " << s << endl;
+                exit(1);
+            }
+            p.bin_size = v;
+        }
+        else if (arg == "--seed") {
+            unsigned int v = 0;
+            string s = next_value(arg);
+            if (!parse_uint_str(s, v)) {
+                cerr << "Invalid unsigned integer for --seed: " << s << endl;
+                exit(1);
+            }
+            p.seed = v;
+        }
+        else if (arg == "--debug") {
+            int v = 0;
+            string s = next_value(arg);
+            if (!parse_int_str(s, v)) {
+                cerr << "Invalid integer for --debug: " << s << endl;
+                exit(1);
+            }
+            p.debug = v;
+        }
+        else {
+            cerr << "Unknown argument: " << arg << endl;
+            exit(1);
+        }
+    }
+    return p;
+}
+
+void validate_run_params(const RunParams& p) {
+    if (p.L < 2) {
+        cerr << "Invalid --L: " << p.L << " (must be >= 2 for square-lattice PBC AFM)" << endl;
+        exit(2);
+    }
+    if (p.L % 2 != 0) {
+        cerr << "Invalid --L: " << p.L
+             << " (must be even with periodic boundaries to keep the AFM lattice bipartite and sign-problem-free)"
+             << endl;
+        exit(2);
+    }
+    if (!(p.J > 0.0)) {
+        cerr << "Invalid --J: " << p.J << " (must be > 0 for AFM coupling in this implementation)" << endl;
+        exit(2);
+    }
+    if (!(p.beta > 0.0) && p.beta != -1.0) {
+        cerr << "Invalid --beta: " << p.beta
+             << " (use a positive value, or omit --beta for the default beta sweep)" << endl;
+        exit(2);
+    }
+    if (p.mc_iter < 2) {
+        cerr << "Invalid --mc_iter: " << p.mc_iter << " (must be >= 2 for error estimates)" << endl;
+        exit(2);
+    }
+    if (p.eq_iter < 0) {
+        cerr << "Invalid --eq_iter: " << p.eq_iter << " (must be >= 0)" << endl;
+        exit(2);
+    }
+    if (p.bin_size <= 0) {
+        cerr << "Invalid --bin_size: " << p.bin_size << " (must be >= 1)" << endl;
+        exit(2);
+    }
+    if (p.debug != 0 && p.debug != 1) {
+        cerr << "Invalid --debug: " << p.debug << " (use 0 or 1)" << endl;
+        exit(2);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Random helpers
+// ---------------------------------------------------------------------------
+inline double rand_double() {
+    return uniform_real_distribution<double>(0.0, 1.0)(rng);
+}
+
+inline int rand_int(int n) {
+    return uniform_int_distribution<int>(0, n - 1)(rng);
+}
+
+// ---------------------------------------------------------------------------
+// Lattice setup
+// ---------------------------------------------------------------------------
+void build_bonds() {
+    NB = 2 * N;
+    bond_site1.resize(NB);
+    bond_site2.resize(NB);
+
     int b = 0;
-    for (int y = 0; y < L; y++)
-    {
-        for (int x = 0; x < L; x++)
-        {
-            int s = idx(x, y);
-            int right = idx((x + 1) % L, y);
-            int up = idx(x, (y + 1) % L);
-            bond_i[b] = s;
-            bond_j[b] = right;
+    for (int y = 0; y < L; y++) {
+        for (int x = 0; x < L; x++) {
+            int site = y * L + x;
+
+            // right neighbor (PBC)
+            int xr = (x + 1) % L;
+            bond_site1[b] = site;
+            bond_site2[b] = y * L + xr;
             b++;
-            bond_i[b] = s;
-            bond_j[b] = up;
+
+            // up neighbor (PBC)
+            int yu = (y + 1) % L;
+            bond_site1[b] = site;
+            bond_site2[b] = yu * L + x;
             b++;
         }
     }
+    assert(b == NB);
 }
 
-void random_spins(vector<int> &spins, mt19937 &rng)
-{
-    uniform_int_distribution<int> coin(0, 1);
-    spins.resize(N);
-    for (int i = 0; i < N; i++)
-    {
-        spins[i] = coin(rng) ? 1 : -1; // +1 or -1 represents 2*Sz
+void init_spins() {
+    spin.resize(N);
+    for (int i = 0; i < N; i++) {
+        spin[i] = (rand_double() < 0.5) ? 1 : -1;
     }
 }
 
-void maybe_expand_ops(vector<Op> &ops, int n_ops)
-{
-    int M = static_cast<int>(ops.size());
-    if (n_ops > static_cast<int>(0.8 * M))
-    {
-        int new_M = static_cast<int>(1.5 * M) + 10;
-        ops.resize(new_M);
-        for (int p = M; p < new_M; p++)
-        {
-            ops[p].type = 0;
-            ops[p].bond = 0;
-        }
+// ---------------------------------------------------------------------------
+// Operator string management
+// ---------------------------------------------------------------------------
+void maybe_expand_ops() {
+    if (n_ops > (int)(0.8 * M)) {
+        int target = n_ops + max(16, n_ops / 3);
+        int new_M = max(max(M + 16, (int)(1.25 * M)), target);
+        ops.resize(new_M, {0, 0});
+        M = new_M;
     }
 }
 
-void diagonal_update(double beta, vector<int> &spins, vector<Op> &ops, int &n_ops,
-                     const vector<int> &bond_i, const vector<int> &bond_j, mt19937 &rng)
-{
-    uniform_real_distribution<double> uni(0.0, 1.0);
-    uniform_int_distribution<int> bond_pick(0, NB - 1);
+// ---------------------------------------------------------------------------
+// Diagonal update
+// ---------------------------------------------------------------------------
+void diagonal_update(double beta) {
+    // For H = J * sum_{<ij>} S_i.S_j, SSE weights scale with beta * J.
+    double prob_factor = 0.5 * beta * J_coupling * NB;
 
-    int M = static_cast<int>(ops.size());
-    // SSE operators:
-    // H1 (diagonal) = 1/4 - Sz_i Sz_j, H2 (off-diagonal) = 1/2 (S+_i S-_j + S-_i S+_j).
-    // Only antiparallel spins contribute with weight w = 1/2; constant shift handled in energy estimator.
-    const double w = 0.5;
+    // Make a working copy of spin state to propagate through imaginary time
+    vector<int> sp(spin);
 
-    for (int p = 0; p < M; p++)
-    {
-        if (ops[p].type == 0)
-        {
-            int b = bond_pick(rng);
-            int i = bond_i[b];
-            int j = bond_j[b];
-            if (spins[i] != spins[j])
-            {
-                double denom = static_cast<double>(M - n_ops);
-                if (denom <= 0.0)
-                    continue;
-                double prob = (beta * J * w * NB) / denom;
-                if (prob > 1.0) prob = 1.0;
-                if (uni(rng) < prob)
-                {
+    for (int p = 0; p < M; p++) {
+        if (ops[p].type == 0) {
+            // Identity slot — attempt insertion
+            int b = rand_int(NB);
+            int s1 = bond_site1[b];
+            int s2 = bond_site2[b];
+            // Only antiparallel spins contribute (matrix element = 1/2)
+            if (sp[s1] != sp[s2]) {
+                double prob = prob_factor / (double)(M - n_ops);
+                if (rand_double() < prob) {
                     ops[p].type = 1;
                     ops[p].bond = b;
                     n_ops++;
                 }
             }
         }
-        else if (ops[p].type == 1)
-        {
-            int b = ops[p].bond;
-            int i = bond_i[b];
-            int j = bond_j[b];
-            if (spins[i] == spins[j])
-            {
+        else if (ops[p].type == 1) {
+            // Diagonal op — attempt removal
+            double prob = (double)(M - n_ops + 1) / prob_factor;
+            if (rand_double() < prob) {
                 ops[p].type = 0;
+                ops[p].bond = 0;
                 n_ops--;
             }
-            else
-            {
-                double prob = (static_cast<double>(M - n_ops + 1)) / (beta * J * w * NB);
-                if (prob > 1.0) prob = 1.0;
-                if (uni(rng) < prob)
-                {
-                    ops[p].type = 0;
-                    n_ops--;
-                }
-            }
         }
-        else if (ops[p].type == 2)
-        {
+        else {
+            // Off-diagonal op (type 2) — propagate spin state
             int b = ops[p].bond;
-            int i = bond_i[b];
-            int j = bond_j[b];
-            spins[i] *= -1;
-            spins[j] *= -1;
+            sp[bond_site1[b]] = -sp[bond_site1[b]];
+            sp[bond_site2[b]] = -sp[bond_site2[b]];
         }
     }
 }
 
-void loop_update(vector<int> &spins, vector<Op> &ops,
-                 const vector<int> &bond_i, const vector<int> &bond_j,
-                 mt19937 &rng)
-{
-    int M = static_cast<int>(ops.size());
-    vector<int> link(4 * M, -1);
-    vector<int> first_leg(N, -1);
-    vector<int> last_leg(N, -1);
-    vector<int> leg_spin(4 * M, 0);
+// ---------------------------------------------------------------------------
+// Loop update
+// ---------------------------------------------------------------------------
+void loop_update() {
+    int n4 = 4 * M;
+    vtx_link.assign(n4, -1);
+    first_vtx.assign(N, -1);
 
-    vector<int> spins_tmp = spins;
+    // --- Part A: Build linked vertex list ---
+    // last_vtx[site] = last exit leg seen for this site
+    vector<int> last_vtx(N, -1);
 
-    for (int p = 0; p < M; p++)
-    {
-        if (ops[p].type == 0)
-            continue;
+    for (int p = 0; p < M; p++) {
+        if (ops[p].type == 0) continue; // skip identity
 
         int b = ops[p].bond;
-        int i = bond_i[b];
-        int j = bond_j[b];
-        int v = 4 * p;
+        int s1 = bond_site1[b];
+        int s2 = bond_site2[b];
 
-        // link along imaginary time
-        if (last_leg[i] != -1)
-        {
-            link[last_leg[i]] = v + 0;
-            link[v + 0] = last_leg[i];
-        }
-        else
-        {
-            first_leg[i] = v + 0;
-        }
-        last_leg[i] = v + 2;
+        // Leg indices for this operator:
+        // 4p+0 = site1 entrance, 4p+1 = site2 entrance
+        // 4p+2 = site1 exit,     4p+3 = site2 exit
+        int v0 = 4 * p;       // site1 entrance
+        int v1 = 4 * p + 1;   // site2 entrance
 
-        if (last_leg[j] != -1)
-        {
-            link[last_leg[j]] = v + 1;
-            link[v + 1] = last_leg[j];
+        // Link site1: entrance ↔ previous exit
+        if (last_vtx[s1] != -1) {
+            vtx_link[v0] = last_vtx[s1];
+            vtx_link[last_vtx[s1]] = v0;
+        } else {
+            first_vtx[s1] = v0;
         }
-        else
-        {
-            first_leg[j] = v + 1;
-        }
-        last_leg[j] = v + 3;
+        last_vtx[s1] = 4 * p + 2; // site1 exit
 
-        // record spins on legs
-        leg_spin[v + 0] = spins_tmp[i];
-        leg_spin[v + 1] = spins_tmp[j];
-        if (ops[p].type == 2)
-        {
-            spins_tmp[i] *= -1;
-            spins_tmp[j] *= -1;
+        // Link site2: entrance ↔ previous exit
+        if (last_vtx[s2] != -1) {
+            vtx_link[v1] = last_vtx[s2];
+            vtx_link[last_vtx[s2]] = v1;
+        } else {
+            first_vtx[s2] = v1;
         }
-        leg_spin[v + 2] = spins_tmp[i];
-        leg_spin[v + 3] = spins_tmp[j];
+        last_vtx[s2] = 4 * p + 3; // site2 exit
     }
 
-    // close worldlines
-    for (int s = 0; s < N; s++)
-    {
-        if (last_leg[s] != -1)
-        {
-            link[last_leg[s]] = first_leg[s];
-            link[first_leg[s]] = last_leg[s];
+    // Close periodic imaginary-time boundary: last exit → first entrance
+    for (int i = 0; i < N; i++) {
+        if (first_vtx[i] != -1) {
+            vtx_link[first_vtx[i]] = last_vtx[i];
+            vtx_link[last_vtx[i]] = first_vtx[i];
         }
     }
 
-    vector<char> visited(4 * M, 0);
-    uniform_real_distribution<double> uni(0.0, 1.0);
-    for (int l = 0; l < 4 * M; l++)
-    {
-        int v = l / 4;
-        if (v >= M || ops[v].type == 0)
-            continue;
-        if (visited[l])
-            continue;
+    // --- Part B: Trace loops and mark flipped legs ---
+    // For the Heisenberg model (only antiparallel vertices have non-zero
+    // weight), the crossing rule pairs entrance-entrance and exit-exit:
+    //   exit_leg = leg XOR 1  (0↔1 at entrance level, 2↔3 at exit level)
+    // This is the unique pairing that preserves the antiparallel constraint
+    // when a loop is flipped: same-spin pairing (0↔2, 1↔3) would create
+    // parallel spin vertices with zero weight.
+    vector<bool> visited(n4, false);
+    vector<bool> flip(n4, false);
 
-        bool do_flip = (uni(rng) < 0.5);
-        int start = l;
-        int curr = l;
-        do
-        {
-            visited[curr] = 1;
-            int vert = curr / 4;
-            int leg = curr % 4;
+    for (int v0 = 0; v0 < n4; v0++) {
+        if (vtx_link[v0] == -1 || visited[v0]) continue;
 
-            if (do_flip)
-                leg_spin[curr] *= -1;
+        bool do_flip = (rand_double() < 0.5);
 
-            int exit_leg = -1;
-            if (ops[vert].type == 1)
-            {
-                // diagonal -> straight pairing (0-2, 1-3)
-                if (leg == 0) exit_leg = vert * 4 + 2;
-                if (leg == 1) exit_leg = vert * 4 + 3;
-                if (leg == 2) exit_leg = vert * 4 + 0;
-                if (leg == 3) exit_leg = vert * 4 + 1;
-            }
-            else
-            {
-                // off-diagonal -> cross pairing (0-3, 1-2)
-                if (leg == 0) exit_leg = vert * 4 + 3;
-                if (leg == 1) exit_leg = vert * 4 + 2;
-                if (leg == 2) exit_leg = vert * 4 + 1;
-                if (leg == 3) exit_leg = vert * 4 + 0;
-            }
+        int v = v0;
+        do {
+            visited[v] = true;
+            if (do_flip) flip[v] = true;
 
-            visited[exit_leg] = 1;
-            if (do_flip)
-            {
-                leg_spin[exit_leg] *= -1;
-                ops[vert].type = (ops[vert].type == 1) ? 2 : 1;
-            }
+            int p = v / 4;
+            int leg = v % 4;
 
-            curr = link[exit_leg];
-        } while (curr != start);
+            // Cross the vertex: pair entrance legs (0↔1), exit legs (2↔3)
+            int exit_leg = leg ^ 1;
+
+            int v_exit = 4 * p + exit_leg;
+            visited[v_exit] = true;
+            if (do_flip) flip[v_exit] = true;
+
+            v = vtx_link[v_exit];
+        } while (v != v0);
     }
 
-    // update spins at time 0
-    for (int s = 0; s < N; s++)
-    {
-        if (first_leg[s] != -1)
-        {
-            spins[s] = leg_spin[first_leg[s]];
+    // --- Part C: Apply operator type toggles ---
+    // Pairs are {0,1} (entrance) and {2,3} (exit). Toggle type if exactly
+    // one pair is on a flipped loop: flip[4p] XOR flip[4p+2].
+    for (int p = 0; p < M; p++) {
+        if (ops[p].type == 0) continue;
+        if (flip[4 * p] != flip[4 * p + 2]) {
+            ops[p].type = 3 - ops[p].type;
+        }
+    }
+
+    // --- Part D: Update base spins ---
+    // If the tau=0 worldline segment for site i was on a flipped loop,
+    // flip spin[i]. The tau=0 segment connects to first_vtx[i] (entrance).
+    for (int i = 0; i < N; i++) {
+        if (first_vtx[i] != -1) {
+            if (flip[first_vtx[i]]) {
+                spin[i] = -spin[i];
+            }
+        } else {
+            // Free spin (no operators): flip with probability 1/2
+            if (rand_double() < 0.5) {
+                spin[i] = -spin[i];
+            }
         }
     }
 }
 
-double avg(const vector<double> &v)
-{
-    if (v.empty())
-        return 0.0;
-    double sum = 0.0;
-    for (size_t i = 0; i < v.size(); i++)
-        sum += v[i];
-    return sum / static_cast<double>(v.size());
+// ---------------------------------------------------------------------------
+// Debug checks
+// ---------------------------------------------------------------------------
+void debug_check(double /* beta */) {
+    // 1. Verify n_ops count
+    int count = 0;
+    for (int p = 0; p < M; p++) {
+        if (ops[p].type != 0) count++;
+    }
+    assert(count == n_ops);
+
+    // 2. All spins are +/-1
+    for (int i = 0; i < N; i++) {
+        assert(spin[i] == 1 || spin[i] == -1);
+    }
+
+    // 3. All operator types are 0, 1, or 2
+    for (int p = 0; p < M; p++) {
+        assert(ops[p].type >= 0 && ops[p].type <= 2);
+    }
+
+    // 4. All bond indices are in [0, NB)
+    for (int p = 0; p < M; p++) {
+        if (ops[p].type != 0) {
+            assert(ops[p].bond >= 0 && ops[p].bond < NB);
+        }
+    }
+
+    // 5. All non-identity ops sit on antiparallel spin pairs
+    //    (check by propagating spin state)
+    vector<int> sp(spin);
+    for (int p = 0; p < M; p++) {
+        if (ops[p].type == 1) {
+            int b = ops[p].bond;
+            assert(sp[bond_site1[b]] != sp[bond_site2[b]]);
+        } else if (ops[p].type == 2) {
+            int b = ops[p].bond;
+            assert(sp[bond_site1[b]] != sp[bond_site2[b]]);
+            sp[bond_site1[b]] = -sp[bond_site1[b]];
+            sp[bond_site2[b]] = -sp[bond_site2[b]];
+        }
+    }
+
+    // 6. Imaginary-time periodicity: propagated state == base state
+    for (int i = 0; i < N; i++) {
+        assert(sp[i] == spin[i]);
+    }
 }
 
-double std_error(const vector<double> &v, int bsize)
-{
-    if (v.size() <= 1)
-        return 0.0;
+// ---------------------------------------------------------------------------
+// Measurements
+// ---------------------------------------------------------------------------
+double measure_staggered_mag() {
+    double ms = 0.0;
+    for (int y = 0; y < L; y++) {
+        for (int x = 0; x < L; x++) {
+            int site = y * L + x;
+            int sublattice_sign = ((x + y) % 2 == 0) ? 1 : -1;
+            ms += sublattice_sign * spin[site];
+        }
+    }
+    // spin[i] = 2*Sz, so ms = sum / (2*N) for magnetization per site
+    return fabs(ms) / (2.0 * N);
+}
 
-    int n = static_cast<int>(v.size());
-    if (bsize < 1)
-        bsize = 1;
-    int nbins = n / bsize;
-    if (nbins < 2)
-    {
-        double mean = avg(v);
+double std_error_binned(const vector<double>& data, int bsize) {
+    int n = (int)data.size();
+    if (n < 2 * bsize) {
+        // Fall back to naive SEM
+        double mean = 0.0;
+        for (int i = 0; i < n; i++) mean += data[i];
+        mean /= n;
         double var = 0.0;
-        for (size_t i = 0; i < v.size(); i++)
-        {
-            double d = v[i] - mean;
+        for (int i = 0; i < n; i++) {
+            double d = data[i] - mean;
             var += d * d;
         }
-        var /= static_cast<double>(v.size() - 1);
-        double stddev = sqrt(var);
-        return stddev / sqrt(static_cast<double>(v.size()));
+        var /= (n - 1);
+        return sqrt(var / n);
     }
 
-    vector<double> bin_means;
-    bin_means.reserve(nbins);
-    for (int b = 0; b < nbins; b++)
-    {
-        double sum = 0.0;
-        int start = b * bsize;
-        for (int i = 0; i < bsize; i++)
-            sum += v[start + i];
-        bin_means.push_back(sum / static_cast<double>(bsize));
+    int n_bins = n / bsize;
+    vector<double> bin_avg(n_bins, 0.0);
+    for (int b = 0; b < n_bins; b++) {
+        for (int k = 0; k < bsize; k++) {
+            bin_avg[b] += data[b * bsize + k];
+        }
+        bin_avg[b] /= bsize;
     }
 
-    double mean = avg(bin_means);
+    double mean = 0.0;
+    for (int b = 0; b < n_bins; b++) mean += bin_avg[b];
+    mean /= n_bins;
+
     double var = 0.0;
-    for (size_t i = 0; i < bin_means.size(); i++)
-    {
-        double d = bin_means[i] - mean;
+    for (int b = 0; b < n_bins; b++) {
+        double d = bin_avg[b] - mean;
         var += d * d;
     }
-    var /= static_cast<double>(bin_means.size() - 1);
-    double stddev = sqrt(var);
-    return stddev / sqrt(static_cast<double>(bin_means.size()));
+    var /= (n_bins - 1);
+    return sqrt(var / n_bins);
 }
 
-int count_non_identity_ops(const vector<Op> &ops)
-{
-    int count = 0;
-    for (size_t i = 0; i < ops.size(); i++)
-    {
-        if (ops[i].type != 0)
-            count++;
+// ---------------------------------------------------------------------------
+// Result row
+// ---------------------------------------------------------------------------
+struct ResultRow {
+    double beta;
+    double E_per_site;
+    double dE;
+    double ms;
+    double dms;
+    double S_pipi;
+    double dS;
+    double Cv;
+    double dCv;
+    double n_avg;
+    int M_final;
+    int converged;
+};
+
+// ---------------------------------------------------------------------------
+// mc_run: simulate one beta value
+// ---------------------------------------------------------------------------
+ResultRow mc_run(double beta) {
+    // Initialize spins
+    init_spins();
+
+    // Initialize operator string
+    // <n> grows with beta*J; start with headroom to reduce resize frequency.
+    M = max(16, (int)(1.25 * beta * J_coupling * NB) + 16);
+    ops.assign(M, {0, 0});
+    n_ops = 0;
+
+    // Equilibration
+    for (int t = 0; t < eq_iter; t++) {
+        diagonal_update(beta);
+        loop_update();
+        maybe_expand_ops();
+        if (debug_flag) debug_check(beta);
     }
-    return count;
+
+    // Measurement
+    vector<double> n_samples;
+    vector<double> n2_samples;
+    vector<double> ms_samples;
+    vector<double> ms2_samples;
+    n_samples.reserve(mc_iter);
+    n2_samples.reserve(mc_iter);
+    ms_samples.reserve(mc_iter);
+    ms2_samples.reserve(mc_iter);
+
+    for (int t = 0; t < mc_iter; t++) {
+        diagonal_update(beta);
+        loop_update();
+        maybe_expand_ops();
+
+        if (debug_flag) debug_check(beta);
+
+        n_samples.push_back((double)n_ops);
+        n2_samples.push_back((double)n_ops * (double)n_ops);
+
+        double ms_val = measure_staggered_mag();
+        ms_samples.push_back(ms_val);
+        ms2_samples.push_back(ms_val * ms_val);
+    }
+
+    // Compute averages
+    double n_avg = 0.0, n2_avg = 0.0, ms_avg = 0.0, ms2_avg = 0.0;
+    for (int i = 0; i < mc_iter; i++) {
+        n_avg += n_samples[i];
+        n2_avg += n2_samples[i];
+        ms_avg += ms_samples[i];
+        ms2_avg += ms2_samples[i];
+    }
+    n_avg /= mc_iter;
+    n2_avg /= mc_iter;
+    ms_avg /= mc_iter;
+    ms2_avg /= mc_iter;
+
+    // Energy per site: E/(J*N) = -<n>/(beta*J*N) + NB/(4*N)
+    double E_per_site = -n_avg / (beta * J_coupling * N) + (double)NB / (4.0 * N);
+
+    // Staggered magnetization
+    double ms_mean = ms_avg;
+
+    // Structure factor: S(pi,pi) = N * <ms^2>
+    double S_pipi = N * ms2_avg;
+
+    // Specific heat: Cv = (<n^2> - <n>^2 - <n>) / N
+    // From SSE: beta^2*(<H^2>-<H>^2) = <n(n-1)>-<n>^2 = <n^2>-<n>^2-<n>
+    double Cv = (n2_avg - n_avg * n_avg - n_avg) / N;
+
+    // Error bars via binned blocking
+    // Energy error: dE = d<n> / (beta * J * N)
+    double dE = std_error_binned(n_samples, bin_size) / (beta * J_coupling * N);
+
+    // ms error
+    double dms = std_error_binned(ms_samples, bin_size);
+
+    // S(pi,pi) error: d(N*<ms^2>) = N * d<ms^2>
+    double dS = N * std_error_binned(ms2_samples, bin_size);
+
+    // Cv error: compute Cv per bin, take SEM of bin values
+    double dCv = 0.0;
+    {
+        int n_bins = mc_iter / bin_size;
+        if (n_bins >= 2) {
+            vector<double> Cv_bins(n_bins);
+            for (int b = 0; b < n_bins; b++) {
+                double bn_avg = 0.0, bn2_avg = 0.0;
+                for (int k = 0; k < bin_size; k++) {
+                    int idx = b * bin_size + k;
+                    bn_avg += n_samples[idx];
+                    bn2_avg += n2_samples[idx];
+                }
+                bn_avg /= bin_size;
+                bn2_avg /= bin_size;
+                Cv_bins[b] = (bn2_avg - bn_avg * bn_avg - bn_avg) / N;
+            }
+            // SEM of Cv_bins
+            double cv_mean = 0.0;
+            for (int b = 0; b < n_bins; b++) cv_mean += Cv_bins[b];
+            cv_mean /= n_bins;
+            double cv_var = 0.0;
+            for (int b = 0; b < n_bins; b++) {
+                double d = Cv_bins[b] - cv_mean;
+                cv_var += d * d;
+            }
+            cv_var /= (n_bins - 1);
+            dCv = sqrt(cv_var / n_bins);
+        }
+    }
+
+    ResultRow row;
+    row.beta = beta;
+    row.E_per_site = E_per_site;
+    row.dE = dE;
+    row.ms = ms_mean;
+    row.dms = dms;
+    row.S_pipi = S_pipi;
+    row.dS = dS;
+    row.Cv = Cv;
+    row.dCv = dCv;
+    row.n_avg = n_avg;
+    row.M_final = M;
+    row.converged = 0; // set later
+    return row;
 }
 
-bool spins_are_pm_one(const vector<int> &spins)
-{
-    for (size_t i = 0; i < spins.size(); i++)
-    {
-        if (spins[i] != 1 && spins[i] != -1)
-            return false;
-    }
-    return true;
-}
+// ---------------------------------------------------------------------------
+// Output
+// ---------------------------------------------------------------------------
+void write_to_file(const vector<ResultRow>& results, unsigned int seed) {
+    ostringstream fname;
+    fname << "mc_qheis_seed_" << seed << ".csv";
+    ofstream fout(fname.str().c_str());
 
-int main(int argc, char* argv[])
-{
-    unsigned int seed = static_cast<unsigned int>(time(nullptr));
-    double single_beta = -1.0;
-
-    for (int i = 1; i < argc; i++)
-    {
-        string arg = argv[i];
-        auto need_value = [&](const string &flag) -> string {
-            if (i + 1 >= argc)
-            {
-                cerr << "Missing value for " << flag << "." << endl;
-                exit(1);
-            }
-            return string(argv[++i]);
-        };
-
-        if (arg == "--L")
-        {
-            L = stoi(need_value(arg));
-        }
-        else if (arg == "--J")
-        {
-            J = stod(need_value(arg));
-        }
-        else if (arg == "--eq_iter")
-        {
-            eq_iter = stoi(need_value(arg));
-        }
-        else if (arg == "--mc_iter")
-        {
-            mc_iter = stoi(need_value(arg));
-        }
-        else if (arg == "--bin_size")
-        {
-            bin_size = stoi(need_value(arg));
-        }
-        else if (arg == "--seed")
-        {
-            seed = static_cast<unsigned int>(stoul(need_value(arg)));
-        }
-        else if (arg == "--beta")
-        {
-            single_beta = stod(need_value(arg));
-        }
-        else if (arg == "--debug")
-        {
-            int v = stoi(need_value(arg));
-            debug_mode = (v != 0);
-        }
-        else
-        {
-            cerr << "Unknown argument: " << arg << endl;
-            return 1;
-        }
+    if (!fout.is_open()) {
+        cerr << "Unable to open file " << fname.str() << endl;
+        exit(10);
     }
 
-    if (L <= 0)
-    {
-        cerr << "L must be positive." << endl;
-        return 1;
-    }
-    if (J == 0.0)
-    {
-        cerr << "J must be nonzero." << endl;
-        return 1;
-    }
-    if (eq_iter < 0 || mc_iter < 1)
-    {
-        cerr << "eq_iter must be >= 0 and mc_iter must be >= 1." << endl;
-        return 1;
-    }
-    if (bin_size < 1)
-    {
-        cerr << "bin_size must be >= 1." << endl;
-        return 1;
-    }
+    fout << "beta,E_per_site,dE,ms,dms,S_pipi,dS,Cv,dCv,n_avg,M,converged" << endl;
 
-    N = L * L;
-    NB = 2 * N;
-
-    mt19937 rng(seed);
-
-    vector<int> bond_i, bond_j;
-    build_bonds(bond_i, bond_j);
-
-    vector<double> beta_list = {2, 4, 8, 12, 16, 20, 24, 32};
-    if (single_beta > 0.0)
-        beta_list = {single_beta};
-
-    vector<double> mc_E, mc_E_err, mc_ms2, mc_ms2_err, mc_ms_abs, mc_ms_abs_err;
-    vector<double> mc_Spi, beta_vec, T_vec, nops_avg;
-    vector<int> converged;
-
-    for (size_t bidx = 0; bidx < beta_list.size(); bidx++)
-    {
-        double beta = beta_list[bidx];
-        if (beta <= 0.0)
-            continue;
-
-        vector<int> spins;
-        random_spins(spins, rng);
-
-        int n_ops = 0;
-        int M_target = max(4 * NB, static_cast<int>(1.5 * beta * NB) + 10);
-        vector<Op> ops(M_target);
-        for (int p = 0; p < M_target; p++)
-        {
-            ops[p].type = 0;
-            ops[p].bond = 0;
-        }
-
-        vector<double> E_config;
-        vector<double> ms2_config;
-        vector<double> ms_abs_config;
-        vector<double> nops_config;
-
-        int total_sweeps = eq_iter + mc_iter;
-        for (int sweep = 0; sweep < total_sweeps; sweep++)
-        {
-            diagonal_update(beta, spins, ops, n_ops, bond_i, bond_j, rng);
-            loop_update(spins, ops, bond_i, bond_j, rng);
-            maybe_expand_ops(ops, n_ops);
-
-            if (n_ops < 0 || n_ops > static_cast<int>(ops.size()))
-            {
-                cerr << "n_ops out of bounds: " << n_ops << " with M=" << ops.size() << endl;
-                return 1;
-            }
-
-            if (debug_mode)
-            {
-                int counted = count_non_identity_ops(ops);
-                if (counted != n_ops)
-                {
-                    cerr << "Debug: n_ops mismatch. n_ops=" << n_ops
-                         << " counted=" << counted << endl;
-                    return 1;
-                }
-                if (!spins_are_pm_one(spins))
-                {
-                    cerr << "Debug: spins not +/-1." << endl;
-                    return 1;
-                }
-                for (size_t p = 0; p < ops.size(); p++)
-                {
-                    if (ops[p].type < 0 || ops[p].type > 2)
-                    {
-                        cerr << "Debug: invalid op type at p=" << p << endl;
-                        return 1;
-                    }
-                }
-            }
-
-            if (sweep >= eq_iter)
-            {
-                double energy = -static_cast<double>(n_ops) / beta + J * NB * 0.25;
-                double ms_sum = 0.0;
-                for (int s = 0; s < N; s++)
-                {
-                    int x = s % L;
-                    int y = s / L;
-                    int stagger = ((x + y) % 2 == 0) ? 1 : -1;
-                    ms_sum += stagger * spins[s];
-                }
-                double ms = (0.5 * ms_sum) / static_cast<double>(N);
-                double ms2 = ms * ms;
-                double ms_abs = fabs(ms);
-                double s_pi_pi = (ms_sum * ms_sum) / (4.0 * static_cast<double>(N));
-
-                E_config.push_back(energy);
-                ms2_config.push_back(ms2);
-                ms_abs_config.push_back(ms_abs);
-                nops_config.push_back(static_cast<double>(n_ops));
-            }
-        }
-
-        int n_measurements = static_cast<int>(E_config.size());
-        int nbins = (bin_size > 0) ? (n_measurements / bin_size) : 0;
-        cout << "beta=" << beta << " measurements=" << n_measurements
-             << " nbins=" << nbins << endl;
-        if (nbins < 10)
-        {
-            cout << "Warning: nbins < 10; error bars may be unreliable." << endl;
-        }
-
-        double E_mean = avg(E_config);
-        double E_err = std_error(E_config, bin_size);
-        double ms2_mean = avg(ms2_config);
-        double ms2_err = std_error(ms2_config, bin_size);
-        double ms_abs_mean = avg(ms_abs_config);
-        double ms_abs_err = std_error(ms_abs_config, bin_size);
-        double nops_mean = avg(nops_config);
-        double s_pi_pi_mean = ms2_mean * static_cast<double>(N);
-
-        mc_E.push_back(E_mean);
-        mc_E_err.push_back(E_err);
-        mc_ms2.push_back(ms2_mean);
-        mc_ms2_err.push_back(ms2_err);
-        mc_ms_abs.push_back(ms_abs_mean);
-        mc_ms_abs_err.push_back(ms_abs_err);
-        mc_Spi.push_back(s_pi_pi_mean);
-        nops_avg.push_back(nops_mean);
-        beta_vec.push_back(beta);
-        T_vec.push_back(1.0 / beta);
-
-        int conv_flag = 0;
-        if (!mc_E.empty() && mc_E.size() >= 2)
-        {
-            size_t k = mc_E.size() - 1;
-            double diff = fabs(mc_E[k] - mc_E[k - 1]);
-            double thresh = 2.0 * sqrt(mc_E_err[k] * mc_E_err[k] + mc_E_err[k - 1] * mc_E_err[k - 1]);
-            if (diff < thresh)
-                conv_flag = 1;
-        }
-        converged.push_back(conv_flag);
-    }
-
-    string fname = "mc_qheis_seed_" + to_string(seed) + ".csv";
-    ofstream fout(fname.c_str(), ios::out);
-    if (!fout.is_open())
-    {
-        cerr << "Unable to open file " << fname << "." << endl;
-        return 1;
-    }
-
-    fout << "L,N,beta,T_over_J,seed,eq_iter,mc_iter,bin_size,"
-         << "E_per_site,dE_per_site,ms2,dms2,ms_abs,dms_abs,S_pi_pi,n_ops_avg,converged" << endl;
-
-    size_t data_points = mc_E.size();
-    for (size_t n = 0; n < data_points; n++)
-    {
-        double E_per_spin = mc_E[n] / (J * N);
-        double dE_per_spin = mc_E_err[n] / (J * N);
-        double T_over_J = T_vec[n];
-
-        fout << setprecision(10)
-             << L << ","
-             << N << ","
-             << beta_vec[n] << ","
-             << T_over_J << ","
-             << seed << ","
-             << eq_iter << ","
-             << mc_iter << ","
-             << bin_size << ","
-             << E_per_spin << ","
-             << dE_per_spin << ","
-             << mc_ms2[n] << ","
-             << mc_ms2_err[n] << ","
-             << mc_ms_abs[n] << ","
-             << mc_ms_abs_err[n] << ","
-             << mc_Spi[n] << ","
-             << nops_avg[n] << ","
-             << converged[n] << endl;
+    fout << fixed << setprecision(8);
+    for (size_t i = 0; i < results.size(); i++) {
+        const ResultRow& r = results[i];
+        fout << r.beta << ","
+             << r.E_per_site << ","
+             << r.dE << ","
+             << r.ms << ","
+             << r.dms << ","
+             << r.S_pipi << ","
+             << r.dS << ","
+             << r.Cv << ","
+             << r.dCv << ","
+             << r.n_avg << ","
+             << r.M_final << ","
+             << r.converged << endl;
     }
 
     fout.close();
+    cout << "Results written to " << fname.str() << endl;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+int main(int argc, char* argv[]) {
+    RunParams p = parse_args(argc, argv);
+    validate_run_params(p);
+
+    L = p.L;
+    N = L * L;
+    J_coupling = p.J;
+    mc_iter = p.mc_iter;
+    eq_iter = p.eq_iter;
+    bin_size = p.bin_size;
+    seed_val = p.seed;
+    debug_flag = p.debug;
+
+    rng.seed(seed_val);
+
+    cout << "SSE QMC: 2D Heisenberg AFM, L=" << L << ", N=" << N
+         << ", J=" << J_coupling << ", seed=" << seed_val << endl;
+
+    build_bonds();
+
+    // Beta values to simulate
+    vector<double> betas;
+    if (p.beta > 0.0) {
+        betas.push_back(p.beta);
+    } else {
+        double default_betas[] = {0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0};
+        for (int i = 0; i < 8; i++) betas.push_back(default_betas[i]);
+    }
+
+    vector<ResultRow> results;
+
+    for (size_t i = 0; i < betas.size(); i++) {
+        double beta = betas[i];
+        cout << "Running beta = " << beta << " ..." << flush;
+
+        ResultRow row = mc_run(beta);
+        results.push_back(row);
+
+        cout << " E/JN = " << fixed << setprecision(6) << row.E_per_site
+             << " +/- " << row.dE
+             << ", ms = " << row.ms
+             << " +/- " << row.dms
+             << ", Cv = " << row.Cv
+             << ", <n> = " << (int)row.n_avg
+             << ", M = " << row.M_final << endl;
+    }
+
+    // Convergence check: consecutive beta points within 2*combined_sigma
+    for (size_t i = 1; i < results.size(); i++) {
+        double dE_combined = 2.0 * sqrt(results[i].dE * results[i].dE +
+                                         results[i-1].dE * results[i-1].dE);
+        double diff = fabs(results[i].E_per_site - results[i-1].E_per_site);
+        if (diff <= dE_combined) {
+            results[i].converged = 1;
+            results[i-1].converged = 1;
+        }
+    }
+
+    write_to_file(results, seed_val);
 
     return 0;
 }
-
-// end of 2D_Quantum_Heisenberg.cpp
